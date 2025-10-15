@@ -2,8 +2,6 @@
 
 Implementation of "Acceleration of CKKS Algorithm with GPU-Driven and Data Compression" achieving **100x speedup** and **90% compression**.
 
-**Paper**: IEEE MWSCAS 2024 - Phan et al.
-
 Built on [Phantom-FHE](https://github.com/encryptorion-lab/phantom-fhe) GPU library.
 
 ## Quick Start
@@ -34,16 +32,6 @@ python3 python_scripts/visualize_results.py --type all
 └── data/                 # Test datasets
 ```
 
-## Key Results
-
-| Operation     | Time (ms) | Speedup vs SEAL |
-|---------------|-----------|-----------------|
-| Encryption    | 0.453     | 66x             |
-| Rotation      | 3.112     | 12x             |
-| Decode        | 1.319     | 13x             |
-
-**Compression**: 90% for images, 49% for text
-
 ## Requirements
 
 - NVIDIA GPU with CUDA 12.3+
@@ -52,11 +40,15 @@ python3 python_scripts/visualize_results.py --type all
 
 ## Citation
 ```bibtex
-@inproceedings{phan2024acceleration,
-  title={Acceleration of CKKS Algorithm with GPU-Driven and Data Compression},
+@inproceedings{phan2024accelerating,
+  title={Accelerating CKKS Homomorphic Encryption with Data Compression on GPUs},
   author={Phan, Quoc Bao and Nguyen, Linh and Nguyen, Tuy Tan},
-  booktitle={IEEE MWSCAS},
-  year={2024}
+  booktitle={67th International Midwest Symposium on Circuits and Systems (MWSCAS)},
+  pages={1145--1149},
+  address={Springfield, MA},
+  month={Aug},
+  year={2024},
+  organization={IEEE}
 }
 ```
 
@@ -66,5 +58,6 @@ python3 python_scripts/visualize_results.py --type all
 - NSF Grant No. 2348464
 
 ## License
+
 
 MIT
