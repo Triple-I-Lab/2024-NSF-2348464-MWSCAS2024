@@ -1,3 +1,0 @@
-/home/baophan/workspace/ckks-compression/build/CMakeFiles/test_phantom.dir
-/home/baophan/workspace/ckks-compression/build/CMakeFiles/edit_cache.dir
-/home/baophan/workspace/ckks-compression/build/CMakeFiles/rebuild_cache.dir
