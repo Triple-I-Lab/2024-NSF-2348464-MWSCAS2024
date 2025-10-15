@@ -1,0 +1,1 @@
+/usr/bin/g++ CMakeFiles/test_phantom.dir/test_phantom.cu.o -o test_phantom  -Wl,-rpath,/home/baophan/workspace/phantom-fhe/build/lib /home/baophan/workspace/phantom-fhe/build/lib/libPhantom.so -lcudart -lcudadevrt -lcudart_static -lrt -lpthread -ldl  -L"/usr/local/cuda/targets/x86_64-linux/lib/stubs" -L"/usr/local/cuda/targets/x86_64-linux/lib"
