@@ -30,8 +30,8 @@ make -j
 
 #### Full Pipeline
 ```bash
-./compress_encrypt ../data/sensor_data.bin dcb
-./compress_encrypt ../data/image_512x512.bin dct
+./compress_encrypt ../data/sensor_data.bin
+./compress_encrypt ../data/image_512x512.bin
 ```
 
 #### Pipeline
@@ -93,5 +93,6 @@ python3 ../python_scripts/verify.py ../data/test_data.bin ../data/test_data_deco
 - NSF Grant No. 2348464
 
 ## License
+
 
 MIT
