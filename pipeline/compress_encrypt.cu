@@ -2,185 +2,285 @@
 #include <vector>
 #include <fstream>
 #include <chrono>
+#include <cmath>
+#include <cuda_runtime.h>
 #include "phantom.h"
 
 using namespace std;
 using namespace phantom;
 using namespace phantom::arith;
 
-// Simple compression simulation
-vector<int> simple_compress(const vector<double>& data) {
-    vector<int> compressed;
-    compressed.reserve(data.size() / 2);
-    
-    // Simple run-length encoding simulation
-    for(size_t i = 0; i < data.size(); i += 2) {
-        compressed.push_back((int)(data[i] * 100));
-    }
-    
-    return compressed;
-}
+#define BLOCK_SIZE_2D 8
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        cerr << "CUDA Error: " << cudaGetErrorString(err) << endl; \
+        exit(1); \
+    } \
+} while(0)
 
-vector<double> simple_decompress(const vector<int>& compressed, size_t original_size) {
-    vector<double> decompressed(original_size);
+// ============================================================================
+// DCT COMPRESSION KERNEL (JPEG-Style)
+// ============================================================================
+
+__global__ void dct_compress_kernel(
+    const float* input,
+    float* output,
+    int width,
+    int height,
+    float threshold
+) {
+    int block_x = blockIdx.x * BLOCK_SIZE_2D;
+    int block_y = blockIdx.y * BLOCK_SIZE_2D;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
     
-    for(size_t i = 0; i < compressed.size() && i * 2 < original_size; i++) {
-        decompressed[i * 2] = compressed[i] / 100.0;
-        if(i * 2 + 1 < original_size) {
-            decompressed[i * 2 + 1] = compressed[i] / 100.0;
+    __shared__ float block[BLOCK_SIZE_2D][BLOCK_SIZE_2D];
+    __shared__ float dct_block[BLOCK_SIZE_2D][BLOCK_SIZE_2D];
+    
+    int x = block_x + tx;
+    int y = block_y + ty;
+    
+    // Load 8x8 block
+    if(x < width && y < height) {
+        block[ty][tx] = input[y * width + x];
+    } else {
+        block[ty][tx] = 0.0f;
+    }
+    __syncthreads();
+    
+    // DCT-II transform
+    float sum = 0.0f;
+    for(int i = 0; i < BLOCK_SIZE_2D; i++) {
+        for(int j = 0; j < BLOCK_SIZE_2D; j++) {
+            float cos_u = cosf((2.0f * i + 1.0f) * tx * M_PI / (2.0f * BLOCK_SIZE_2D));
+            float cos_v = cosf((2.0f * j + 1.0f) * ty * M_PI / (2.0f * BLOCK_SIZE_2D));
+            sum += block[j][i] * cos_u * cos_v;
         }
     }
     
-    return decompressed;
+    // Normalization
+    float alpha_u = (tx == 0) ? sqrtf(1.0f / BLOCK_SIZE_2D) : sqrtf(2.0f / BLOCK_SIZE_2D);
+    float alpha_v = (ty == 0) ? sqrtf(1.0f / BLOCK_SIZE_2D) : sqrtf(2.0f / BLOCK_SIZE_2D);
+    dct_block[ty][tx] = sum * alpha_u * alpha_v;
+    __syncthreads();
+    
+    // Quantization: zero out small coefficients
+    float val = dct_block[ty][tx];
+    if (fabsf(val) < threshold) {
+        val = 0.0f;
+    }
+    
+    if(x < width && y < height) {
+        output[y * width + x] = val;
+    }
 }
 
-class CompressEncryptPipeline {
-private:
-    PhantomContext context;
-    PhantomSecretKey secret_key;
-    PhantomPublicKey public_key;
-    PhantomCKKSEncoder encoder;
-    double scale;
+// ============================================================================
+// DATA LOADER
+// ============================================================================
+
+vector<float> load_binary(const string& filename) {
+    ifstream file(filename, ios::binary);
+    if (!file.is_open()) {
+        cerr << "Error: Cannot open file " << filename << endl;
+        exit(1);
+    }
     
-    struct PipelineMetrics {
-        double compression_time_ms;
-        double encryption_time_ms;
-        double decryption_time_ms;
-        double decompression_time_ms;
-        size_t original_size;
-        size_t compressed_size;
-        double compression_ratio;
-    };
+    file.seekg(0, ios::end);
+    size_t file_size = file.tellg();
+    file.seekg(0, ios::beg);
+    
+    size_t num_elements = file_size / sizeof(float);
+    vector<float> data(num_elements);
+    
+    file.read(reinterpret_cast<char*>(data.data()), file_size);
+    file.close();
+    
+    cout << "Loaded " << num_elements << " floats from " << filename << endl;
+    return data;
+}
+
+// ============================================================================
+// DCT COMPRESSOR CLASS
+// ============================================================================
+
+class DCTCompressor {
+private:
+    float* d_input;
+    float* d_output;
+    int width, height;
     
 public:
-    CompressEncryptPipeline(size_t poly_modulus_degree = 8192) 
-        : context(create_context(poly_modulus_degree)),
-          secret_key(context),
-          public_key(secret_key.gen_publickey(context)),
-          encoder(context),
-          scale(pow(2.0, 40)) {
+    DCTCompressor(int w, int h) : width(w), height(h) {
+        CUDA_CHECK(cudaMalloc(&d_input, w * h * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_output, w * h * sizeof(float)));
     }
     
-    static PhantomContext create_context(size_t poly_modulus_degree) {
-        EncryptionParameters parms(scheme_type::ckks);
-        parms.set_poly_modulus_degree(poly_modulus_degree);
-        parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, {60, 40, 40, 60}));
-        return PhantomContext(parms);
+    ~DCTCompressor() {
+        cudaFree(d_input);
+        cudaFree(d_output);
     }
     
-    PipelineMetrics run_pipeline(const vector<double>& data) {
-        PipelineMetrics metrics;
-        metrics.original_size = data.size() * sizeof(double);
+    vector<float> compress(const vector<float>& data, float quality, double& time_ms) {
+        CUDA_CHECK(cudaMemcpy(d_input, data.data(), data.size() * sizeof(float), cudaMemcpyHostToDevice));
         
-        cout << "\n=== Compress + Encrypt Pipeline ===" << endl;
-        cout << "Original data size: " << metrics.original_size << " bytes" << endl;
+        // Calculate threshold: higher quality = lower threshold = less compression
+        float threshold = 0.5f * (1.0f - quality) * 50.0f;
         
-        // Step 1: Compression
+        dim3 grid((width + BLOCK_SIZE_2D - 1) / BLOCK_SIZE_2D, 
+                  (height + BLOCK_SIZE_2D - 1) / BLOCK_SIZE_2D);
+        dim3 block(BLOCK_SIZE_2D, BLOCK_SIZE_2D);
+        
         auto start = chrono::high_resolution_clock::now();
-        auto compressed = simple_compress(data);
-        auto compress_time = chrono::duration_cast<chrono::milliseconds>(
-            chrono::high_resolution_clock::now() - start);
-        metrics.compression_time_ms = compress_time.count();
-        metrics.compressed_size = compressed.size() * sizeof(int);
-        metrics.compression_ratio = (1.0 - (double)metrics.compressed_size / metrics.original_size) * 100;
         
-        cout << "Compressed size: " << metrics.compressed_size << " bytes" << endl;
-        cout << "Compression ratio: " << metrics.compression_ratio << "%" << endl;
-        cout << "Compression time: " << metrics.compression_time_ms << " ms" << endl;
+        dct_compress_kernel<<<grid, block>>>(d_input, d_output, width, height, threshold);
+        CUDA_CHECK(cudaDeviceSynchronize());
         
-        // Convert to double for CKKS
-        vector<double> compressed_double(compressed.begin(), compressed.end());
+        auto end = chrono::high_resolution_clock::now();
+        time_ms = chrono::duration<double, milli>(end - start).count();
         
-        // Pad to slot count
-        size_t slot_count = encoder.slot_count();
-        if(compressed_double.size() < slot_count) {
-            compressed_double.resize(slot_count, 0.0);
-        }
+        vector<float> result(data.size());
+        CUDA_CHECK(cudaMemcpy(result.data(), d_output, data.size() * sizeof(float), cudaMemcpyDeviceToHost));
         
-        // Step 2: Encode + Encrypt
-        PhantomPlaintext plain;
-        encoder.encode(context, compressed_double, scale, plain);
-        
-        start = chrono::high_resolution_clock::now();
-        PhantomCiphertext cipher;
-        public_key.encrypt_asymmetric(context, plain, cipher);
-        auto encrypt_time = chrono::duration_cast<chrono::milliseconds>(
-            chrono::high_resolution_clock::now() - start);
-        metrics.encryption_time_ms = encrypt_time.count();
-        
-        cout << "Encryption time: " << metrics.encryption_time_ms << " ms" << endl;
-        
-        // Step 3: Decrypt
-        start = chrono::high_resolution_clock::now();
-        PhantomPlaintext decrypted_plain;
-        secret_key.decrypt(context, cipher, decrypted_plain);
-        auto decrypt_time = chrono::duration_cast<chrono::milliseconds>(
-            chrono::high_resolution_clock::now() - start);
-        metrics.decryption_time_ms = decrypt_time.count();
-        
-        cout << "Decryption time: " << metrics.decryption_time_ms << " ms" << endl;
-        
-        // Step 4: Decode + Decompress
-        vector<double> decoded;
-        encoder.decode(context, decrypted_plain, decoded);
-        
-        start = chrono::high_resolution_clock::now();
-        vector<int> compressed_recovered(decoded.begin(), decoded.begin() + compressed.size());
-        auto decompressed = simple_decompress(compressed_recovered, data.size());
-        auto decompress_time = chrono::duration_cast<chrono::milliseconds>(
-            chrono::high_resolution_clock::now() - start);
-        metrics.decompression_time_ms = decompress_time.count();
-        
-        cout << "Decompression time: " << metrics.decompression_time_ms << " ms" << endl;
-        
-        // Verify correctness
-        double max_error = 0;
-        for(size_t i = 0; i < min(data.size(), decompressed.size()); i++) {
-            double error = abs(data[i] - decompressed[i]);
-            max_error = max(max_error, error);
-        }
-        cout << "Max reconstruction error: " << max_error << endl;
-        
-        double total_time = metrics.compression_time_ms + metrics.encryption_time_ms + 
-                           metrics.decryption_time_ms + metrics.decompression_time_ms;
-        cout << "Total pipeline time: " << total_time << " ms" << endl;
-        
-        return metrics;
-    }
-    
-    void save_metrics(const PipelineMetrics& metrics, const string& filename) {
-        ofstream file(filename);
-        file << "Metric,Value\n";
-        file << "Original_size_bytes," << metrics.original_size << "\n";
-        file << "Compressed_size_bytes," << metrics.compressed_size << "\n";
-        file << "Compression_ratio_percent," << metrics.compression_ratio << "\n";
-        file << "Compression_time_ms," << metrics.compression_time_ms << "\n";
-        file << "Encryption_time_ms," << metrics.encryption_time_ms << "\n";
-        file << "Decryption_time_ms," << metrics.decryption_time_ms << "\n";
-        file << "Decompression_time_ms," << metrics.decompression_time_ms << "\n";
-        file.close();
-        cout << "\nMetrics saved to " << filename << endl;
+        return result;
     }
 };
 
+// ============================================================================
+// MAIN PIPELINE
+// ============================================================================
+
 int main(int argc, char** argv) {
-    cout << "Compress + Encrypt Pipeline (Phantom-FHE)" << endl;
+    cout << "\n========================================" << endl;
+    cout << "DCT Compress + Encrypt Pipeline" << endl;
+    cout << "========================================\n" << endl;
     
-    // Generate test data
-    size_t data_size = 4096;
-    if(argc > 1) {
-        data_size = atoi(argv[1]);
+    if (argc < 2) {
+        cout << "Usage: " << argv[0] << " <data_file> [quality]" << endl;
+        cout << "  quality: 0.1-0.9 (default 0.5)" << endl;
+        cout << "  0.1 = high compression, 0.9 = low compression" << endl;
+        cout << "\nExample: " << argv[0] << " data/image_512x512.bin 0.5" << endl;
+        return 1;
     }
     
-    vector<double> data(data_size);
-    for(size_t i = 0; i < data_size; i++) {
-        data[i] = 3.14 + (i % 100) * 0.01;
+    string data_file = argv[1];
+    float quality = (argc > 2) ? atof(argv[2]) : 0.5f;
+    
+    // Load data
+    vector<float> data = load_binary(data_file);
+    size_t original_size = data.size() * sizeof(float);
+    
+    // Make square for DCT
+    int dim = (int)sqrt(data.size());
+    if (dim * dim != data.size()) {
+        dim = (int)ceil(sqrt(data.size()));
+        data.resize(dim * dim, 0.0f);
     }
     
-    // Run pipeline
-    CompressEncryptPipeline pipeline;
-    auto metrics = pipeline.run_pipeline(data);
-    pipeline.save_metrics(metrics, "pipeline_results.csv");
+    cout << "Data: " << dim << "x" << dim << " (" << original_size << " bytes)" << endl;
+    cout << "Quality: " << quality << endl;
+    
+    // Step 1: DCT Compression
+    cout << "\n--- Compression ---" << endl;
+    DCTCompressor compressor(dim, dim);
+    double comp_time;
+    vector<float> compressed = compressor.compress(data, quality, comp_time);
+    
+    // Count non-zero coefficients (sparse representation)
+    int non_zero = 0;
+    for (float val : compressed) {
+        if (val != 0.0f) non_zero++;
+    }
+    
+    size_t compressed_size = non_zero * 2 * sizeof(int);  // Store (position, value) pairs
+    double comp_ratio = (1.0 - (double)compressed_size / original_size) * 100;
+    
+    cout << "Compression time: " << comp_time << " ms" << endl;
+    cout << "Non-zero coefficients: " << non_zero << " / " << compressed.size() << endl;
+    cout << "Compressed size: " << compressed_size << " bytes" << endl;
+    cout << "Compression ratio: " << comp_ratio << "%" << endl;
+    
+    // Convert to sparse representation
+    vector<double> sparse_data;
+    sparse_data.reserve(non_zero * 2);
+    for (size_t i = 0; i < compressed.size(); i++) {
+        if (compressed[i] != 0.0f) {
+            sparse_data.push_back((double)i);  // Position
+            sparse_data.push_back((double)(compressed[i] * 100.0f));  // Quantized value
+        }
+    }
+    
+    cout << "Sparse data size: " << sparse_data.size() << " values" << endl;
+    
+    // Step 2: Encryption
+    cout << "\n--- Encryption ---" << endl;
+    
+    EncryptionParameters parms(scheme_type::ckks);
+    parms.set_poly_modulus_degree(8192);
+    parms.set_coeff_modulus(CoeffModulus::Create(8192, {60, 40, 40, 60}));
+    PhantomContext context(parms);
+    
+    PhantomSecretKey secret_key(context);
+    PhantomPublicKey public_key = secret_key.gen_publickey(context);
+    PhantomCKKSEncoder encoder(context);
+    double scale = pow(2.0, 40);
+    
+    cout << "Slot count: " << encoder.slot_count() << endl;
+    
+    // Pad to slot count
+    if (sparse_data.size() > encoder.slot_count()) {
+        cout << "Warning: Data larger than slot count, truncating" << endl;
+        sparse_data.resize(encoder.slot_count());
+    } else if (sparse_data.size() < encoder.slot_count()) {
+        sparse_data.resize(encoder.slot_count(), 0.0);
+    }
+    
+    PhantomPlaintext plain;
+    encoder.encode(context, sparse_data, scale, plain);
+    
+    auto start = chrono::high_resolution_clock::now();
+    PhantomCiphertext cipher;
+    public_key.encrypt_asymmetric(context, plain, cipher);
+    auto enc_time = chrono::duration<double, milli>(chrono::high_resolution_clock::now() - start).count();
+    cout << "Encryption time: " << enc_time << " ms" << endl;
+    
+    // Step 3: Decryption
+    cout << "\n--- Decryption ---" << endl;
+    start = chrono::high_resolution_clock::now();
+    PhantomPlaintext decrypted;
+    secret_key.decrypt(context, cipher, decrypted);
+    auto dec_time = chrono::duration<double, milli>(chrono::high_resolution_clock::now() - start).count();
+    cout << "Decryption time: " << dec_time << " ms" << endl;
+    
+    vector<double> decoded;
+    encoder.decode(context, decrypted, decoded);
+    
+    // Verify
+    double max_error = 0;
+    for (size_t i = 0; i < min(sparse_data.size(), decoded.size()); i++) {
+        max_error = max(max_error, abs(sparse_data[i] - decoded[i]));
+    }
+    
+    cout << "\n--- Summary ---" << endl;
+    cout << "Max reconstruction error: " << max_error << endl;
+    cout << "Total time: " << (comp_time + enc_time + dec_time) << " ms" << endl;
+    
+    // Save results
+    ofstream out("dct_results.csv");
+    out << "Metric,Value\n";
+    out << "Original_size_bytes," << original_size << "\n";
+    out << "Compressed_size_bytes," << compressed_size << "\n";
+    out << "Compression_ratio_percent," << comp_ratio << "\n";
+    out << "Non_zero_coefficients," << non_zero << "\n";
+    out << "Compression_time_ms," << comp_time << "\n";
+    out << "Encryption_time_ms," << enc_time << "\n";
+    out << "Decryption_time_ms," << dec_time << "\n";
+    out << "Total_time_ms," << (comp_time + enc_time + dec_time) << "\n";
+    out << "Max_error," << max_error << "\n";
+    out.close();
+    
+    cout << "\nResults saved to dct_results.csv" << endl;
     
     return 0;
 }

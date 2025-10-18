@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <chrono>
 
 #define BLOCK_SIZE_2D 8
 

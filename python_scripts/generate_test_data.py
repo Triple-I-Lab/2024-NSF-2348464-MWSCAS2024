@@ -1,170 +1,163 @@
 #!/usr/bin/env python3
-import random
-import string
+"""
+Generate test data for compress + encrypt pipeline
+Compatible with the C++ CUDA code
+"""
+
 import numpy as np
+import argparse
 import os
-from PIL import Image
+from pathlib import Path
 
-def generate_random_text(num_chars, output_file):
-    """Generate random text data"""
-    print(f"Generating {num_chars} characters of random text...")
+def generate_random_data(size, data_type='float32'):
+    """Generate random floating point data"""
+    if data_type == 'normal':
+        # Normal distribution
+        data = np.random.randn(size).astype(np.float32)
+    elif data_type == 'uniform':
+        # Uniform distribution [0, 1]
+        data = np.random.uniform(0, 1, size).astype(np.float32)
+    elif data_type == 'sensor':
+        # Simulate sensor data (temperature-like)
+        base = 20.0
+        noise = np.random.randn(size) * 2.0
+        trend = np.sin(np.linspace(0, 4*np.pi, size)) * 5.0
+        data = (base + noise + trend).astype(np.float32)
+    else:
+        # Default: scaled random
+        data = (np.random.rand(size) * 100).astype(np.float32)
     
-    # Mix of random words and repeated patterns for better compression
-    words = [''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 10))) 
-             for _ in range(1000)]
-    
-    text = []
-    total_chars = 0
-    
-    while total_chars < num_chars:
-        word = random.choice(words)
-        text.append(word)
-        text.append(' ')
-        total_chars += len(word) + 1
-    
-    final_text = ''.join(text)[:num_chars]
-    
-    with open(output_file, 'w') as f:
-        f.write(final_text)
-    
-    print(f"Saved to {output_file} ({len(final_text)} bytes)")
-    return output_file
+    return data
 
-def generate_random_numbers(num_entries, output_file):
-    """Generate random numbers for compression testing"""
-    print(f"Generating {num_entries} random numbers...")
+def generate_image_data(width, height, pattern='gradient'):
+    """Generate 2D image data for DCT compression"""
+    if pattern == 'gradient':
+        x = np.linspace(0, 1, width)
+        y = np.linspace(0, 1, height)
+        xx, yy = np.meshgrid(x, y)
+        data = (xx + yy) * 127.5
+    elif pattern == 'checkerboard':
+        data = np.zeros((height, width))
+        data[::2, ::2] = 255
+        data[1::2, 1::2] = 255
+    elif pattern == 'sine':
+        x = np.linspace(0, 4*np.pi, width)
+        y = np.linspace(0, 4*np.pi, height)
+        xx, yy = np.meshgrid(x, y)
+        data = (np.sin(xx) * np.cos(yy) + 1) * 127.5
+    elif pattern == 'random':
+        data = np.random.rand(height, width) * 255
+    else:
+        data = np.ones((height, width)) * 128
     
-    data = [random.randint(1, 1000) for _ in range(num_entries)]
-    
-    with open(output_file, 'w') as f:
-        for num in data:
-            f.write(f"{num}\n")
-    
-    file_size = os.path.getsize(output_file)
-    print(f"Saved to {output_file} ({file_size} bytes)")
-    return output_file
+    return data.astype(np.float32).flatten()
 
-def generate_random_image(width, height, output_file):
-    """Generate random image data"""
-    print(f"Generating {width}x{height} random image...")
-    
-    # Create random RGB image
-    data = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
-    
-    # Add some structure for better compression
-    # Add gradient
-    gradient = np.linspace(0, 255, width).astype(np.uint8)
-    data[:, :, 0] = (data[:, :, 0] * 0.5 + gradient * 0.5).astype(np.uint8)
-    
-    # Add some repeated blocks
-    block_size = 32
-    for i in range(0, height, block_size):
-        for j in range(0, width, block_size):
-            if random.random() > 0.5:
-                color = [random.randint(0, 255) for _ in range(3)]
-                data[i:i+block_size, j:j+block_size] = color
-    
-    img = Image.fromarray(data, 'RGB')
-    img.save(output_file)
-    
-    file_size = os.path.getsize(output_file)
-    print(f"Saved to {output_file} ({file_size} bytes)")
-    return output_file
+def save_binary(data, filename):
+    """Save data as binary file"""
+    data.tofile(filename)
+    print(f"Saved binary data to {filename}")
+    print(f"  Shape: {data.shape}")
+    print(f"  Size: {data.nbytes} bytes")
+    print(f"  Min: {data.min():.2f}, Max: {data.max():.2f}, Mean: {data.mean():.2f}")
 
-def generate_test_dataset(base_dir='data'):
-    """Generate complete test dataset"""
-    os.makedirs(base_dir, exist_ok=True)
-    
-    print("="*60)
-    print("Generating Test Dataset")
-    print("="*60)
-    
-    files = {}
-    
-    # Text files of various sizes
-    text_sizes = [1000, 5000, 10000, 50000, 100000]
-    for size in text_sizes:
-        filename = f"{base_dir}/text_{size}.txt"
-        generate_random_text(size, filename)
-        files[f'text_{size}'] = filename
-    
-    # Number files
-    number_sizes = [100, 500, 1000, 5000, 10000]
-    for size in number_sizes:
-        filename = f"{base_dir}/numbers_{size}.txt"
-        generate_random_numbers(size, filename)
-        files[f'numbers_{size}'] = filename
-    
-    # Images of various sizes
-    image_sizes = [(64, 64), (128, 128), (256, 256), (512, 512)]
-    for width, height in image_sizes:
-        filename = f"{base_dir}/image_{width}x{height}.png"
-        generate_random_image(width, height, filename)
-        files[f'image_{width}x{height}'] = filename
-    
-    print("\n" + "="*60)
-    print(f"Generated {len(files)} test files in {base_dir}/")
-    print("="*60)
-    
-    # Save file list
-    with open(f"{base_dir}/file_list.txt", 'w') as f:
-        for name, path in files.items():
-            size = os.path.getsize(path)
-            f.write(f"{name}: {path} ({size} bytes)\n")
-    
-    return files
+def save_csv(data, filename):
+    """Save data as CSV file"""
+    np.savetxt(filename, data, delimiter=',', header='value', comments='')
+    print(f"Saved CSV data to {filename}")
+    print(f"  Size: {len(data)} values")
 
-def generate_paper_dataset():
-    """Generate datasets matching the paper's experiments"""
-    print("\n" + "="*60)
-    print("Generating Paper-Specific Datasets")
-    print("="*60)
-    
-    os.makedirs('data/paper', exist_ok=True)
-    
-    # Text data sizes from paper (Table I)
-    text_sizes = [10000, 20000, 40000, 60000, 80000]
-    
-    for size in text_sizes:
-        filename = f"data/paper/text_{size//1000}k.txt"
-        generate_random_text(size, filename)
-    
-    # Image data sizes from paper (Figure 2)
-    image_sizes = [
-        (64, 64),    # ~5k pixels
-        (128, 128),  # ~10k pixels
-        (181, 181),  # ~15k pixels
-        (256, 256),  # ~20k pixels
-    ]
-    
-    for width, height in image_sizes:
-        filename = f"data/paper/image_{width}x{height}.png"
-        generate_random_image(width, height, filename)
-    
-    print(f"\nPaper datasets saved in data/paper/")
-
-if __name__ == '__main__':
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Generate test data for compression experiments')
-    parser.add_argument('--type', choices=['text', 'image', 'numbers', 'all', 'paper'], 
-                       default='all', help='Type of data to generate')
-    parser.add_argument('--size', type=int, help='Size of data (chars for text, pixels for image)')
-    parser.add_argument('--output', default='data/test', help='Output file/directory')
+def main():
+    parser = argparse.ArgumentParser(description='Generate test data for compress+encrypt pipeline')
+    parser.add_argument('--type', choices=['all', '1d', '2d', 'small', 'large'], 
+                        default='all', help='Type of data to generate')
+    parser.add_argument('--output-dir', default='data', help='Output directory')
+    parser.add_argument('--size', type=int, default=4096, help='Size for 1D data')
+    parser.add_argument('--width', type=int, default=512, help='Width for 2D data')
+    parser.add_argument('--height', type=int, default=512, help='Height for 2D data')
     
     args = parser.parse_args()
     
-    if args.type == 'all':
-        generate_test_dataset()
-        generate_paper_dataset()
-    elif args.type == 'paper':
-        generate_paper_dataset()
-    elif args.type == 'text':
-        size = args.size or 10000
-        generate_random_text(size, args.output + '.txt')
-    elif args.type == 'image':
-        size = args.size or 256
-        generate_random_image(size, size, args.output + '.png')
-    elif args.type == 'numbers':
-        size = args.size or 1000
-        generate_random_numbers(size, args.output + '.txt')
+    # Create output directory
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    print("=" * 60)
+    print("Generating Test Data for Compress + Encrypt Pipeline")
+    print("=" * 60)
+    
+    if args.type in ['all', '1d', 'small']:
+        # Small 1D data (for quick testing)
+        print("\n[1] Small 1D Random Data")
+        data = generate_random_data(1024, 'uniform')
+        save_binary(data, output_dir / 'test_small.bin')
+        save_csv(data, output_dir / 'test_small.csv')
+    
+    if args.type in ['all', '1d']:
+        # Medium 1D data
+        print("\n[2] Medium 1D Random Data")
+        data = generate_random_data(args.size, 'uniform')
+        save_binary(data, output_dir / 'test_data.bin')
+        save_csv(data, output_dir / 'test_data.csv')
+        
+        # Sensor-like data
+        print("\n[3] Sensor Data")
+        data = generate_random_data(args.size, 'sensor')
+        save_binary(data, output_dir / 'sensor_data.bin')
+        save_csv(data, output_dir / 'sensor_data.csv')
+    
+    if args.type in ['all', '1d', 'large']:
+        # Large 1D data
+        print("\n[4] Large 1D Data")
+        data = generate_random_data(16384, 'normal')
+        save_binary(data, output_dir / 'test_large.bin')
+    
+    if args.type in ['all', '2d']:
+        # 2D image data for DCT
+        print("\n[5] 2D Image Data (Gradient)")
+        data = generate_image_data(args.width, args.height, 'gradient')
+        save_binary(data, output_dir / 'image_gradient.bin')
+        
+        print("\n[6] 2D Image Data (Sine Pattern)")
+        data = generate_image_data(args.width, args.height, 'sine')
+        save_binary(data, output_dir / 'image_sine.bin')
+        
+        print("\n[7] 2D Image Data (Random)")
+        data = generate_image_data(args.width, args.height, 'random')
+        save_binary(data, output_dir / 'image_random.bin')
+    
+    if args.type in ['all', '2d']:
+        # Square image for DCT (must be multiple of 8)
+        sizes = [64, 128, 256, 512]
+        for size in sizes:
+            print(f"\n[Image {size}x{size}]")
+            data = generate_image_data(size, size, 'sine')
+            save_binary(data, output_dir / f'image_{size}x{size}.bin')
+    
+    print("\n" + "=" * 60)
+    print("Data generation complete!")
+    print(f"Output directory: {output_dir.absolute()}")
+    print("=" * 60)
+    
+    # Create README
+    readme_path = output_dir / 'README.txt'
+    with open(readme_path, 'w') as f:
+        f.write("Test Data Files for Compress + Encrypt Pipeline\n")
+        f.write("=" * 60 + "\n\n")
+        f.write("1D Data (for DCB compression):\n")
+        f.write("  - test_small.bin/csv: 1024 floats\n")
+        f.write("  - test_data.bin/csv: 4096 floats (default)\n")
+        f.write("  - sensor_data.bin/csv: 4096 floats (sensor simulation)\n")
+        f.write("  - test_large.bin: 16384 floats\n\n")
+        f.write("2D Data (for DCT compression):\n")
+        f.write("  - image_gradient.bin: gradient pattern\n")
+        f.write("  - image_sine.bin: sine wave pattern\n")
+        f.write("  - image_random.bin: random noise\n")
+        f.write("  - image_*x*.bin: various square sizes\n\n")
+        f.write("Usage:\n")
+        f.write("  ./compress_encrypt data/test_data.bin dcb\n")
+        f.write("  ./compress_encrypt data/image_512x512.bin dct\n")
+    
+    print(f"\nREADME created: {readme_path}")
+
+if __name__ == '__main__':
+    main()
