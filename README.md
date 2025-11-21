@@ -47,7 +47,7 @@ python3 ../compress/decompress.py ../data/image_64x64_encrypted.bin
 
 #### Verify Results
 ```bash
-python3 ../python_scripts/verify.py ../data/test_data.bin ../data/test_data_decompressed.bin
+python3 ../python_scripts/verify.py ../data/{original.bin} ../data/{decompressed_file.bin}
 ```
 
 ## Project Structure
@@ -96,3 +96,4 @@ python3 ../python_scripts/verify.py ../data/test_data.bin ../data/test_data_deco
 
 
 MIT
+
